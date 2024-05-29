@@ -11,6 +11,7 @@ from pytorch_lightning import Trainer
 from pytorch_lightning import seed_everything
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import TensorBoardLogger
+from pytorch_lightning.strategies import DDPStrategy
 from torch.utils.data import DataLoader
 from torchvision.transforms import InterpolationMode
 from os.path import join
@@ -124,15 +125,17 @@ class JBUFeatUp(pl.LightningModule):
                 img = batch['img']
             else:
                 img, _ = batch
-            lr_feats = self.model(img)
+            lr_feats = self.model(img)  # Extract low-resolution features using the featurizer
 
         full_rec_loss = 0.0
         full_crf_loss = 0.0
         full_entropy_loss = 0.0
         full_tv_loss = 0.0
         full_total_loss = 0.0
+
+        # Apply jittered transformations and calculate losses over multiple jitters
         for i in range(self.n_jitters):
-            hr_feats = self.upsampler(lr_feats, img)
+            hr_feats = self.upsampler(lr_feats, img) # Upsample the low-resolution features to high resolution
 
             if hr_feats.shape[2] != img.shape[2]:
                 hr_feats = torch.nn.functional.interpolate(hr_feats, img.shape[2:], mode="bilinear")
@@ -140,8 +143,8 @@ class JBUFeatUp(pl.LightningModule):
             with torch.no_grad():
                 transform_params = sample_transform(
                     True, self.max_pad, self.max_zoom, img.shape[2], img.shape[3])
-                jit_img = apply_jitter(img, self.max_pad, transform_params)
-                lr_jit_feats = self.model(jit_img)
+                jit_img = apply_jitter(img, self.max_pad, transform_params) # Apply jittered transformations to the input image
+                lr_jit_feats = self.model(jit_img)  # Extract low-resolution features from the jittered image
 
             if self.random_projection is not None:
                 proj = torch.randn(lr_feats.shape[0],
@@ -151,11 +154,12 @@ class JBUFeatUp(pl.LightningModule):
             else:
                 proj = None
 
-            hr_jit_feats = apply_jitter(hr_feats, self.max_pad, transform_params)
-            proj_hr_feats = self.project(hr_jit_feats, proj)
+            hr_jit_feats = apply_jitter(hr_feats, self.max_pad, transform_params) # Apply the same jittered transformation to the high-resolution features
+            proj_hr_feats = self.project(hr_jit_feats, proj) # Project the high-resolution jittered features
 
-            down_jit_feats = self.project(self.downsampler(hr_jit_feats, jit_img), proj)
+            down_jit_feats = self.project(self.downsampler(hr_jit_feats, jit_img), proj)  # Downsample the high-resolution jittered features
 
+            # Calculate reconstruction loss
             if self.predicted_uncertainty:
                 scales = self.scale_net(lr_jit_feats)
                 scale_factor = (1 / (2 * scales ** 2))
@@ -166,34 +170,40 @@ class JBUFeatUp(pl.LightningModule):
 
             full_rec_loss += rec_loss.item()
 
+            # Calculate CRF loss if applicable
             if self.crf_weight > 0 and i == 0:
                 crf_loss = self.crf(img, proj_hr_feats)
                 full_crf_loss += crf_loss.item()
             else:
                 crf_loss = 0.0
 
+            # Calculate entropy loss if applicable
             if self.filter_ent_weight > 0.0:
                 entropy_loss = entropy(self.downsampler.get_kernel())
                 full_entropy_loss += entropy_loss.item()
             else:
                 entropy_loss = 0
 
+            # Calculate total variation (TV) loss if applicable
             if self.tv_weight > 0 and i == 0:
                 tv_loss = self.tv(proj_hr_feats.square().sum(1, keepdim=True))
                 full_tv_loss += tv_loss.item()
             else:
                 tv_loss = 0.0
 
+            # Combine all losses
             loss = rec_loss + self.crf_weight * crf_loss + self.tv_weight * tv_loss - self.filter_ent_weight * entropy_loss
             full_total_loss += loss.item()
-            self.manual_backward(loss)
+            self.manual_backward(loss)  # Perform backpropagation manually
 
+        # Log the average losses
         self.avg.add("loss/crf", full_crf_loss)
         self.avg.add("loss/ent", full_entropy_loss)
         self.avg.add("loss/tv", full_tv_loss)
         self.avg.add("loss/rec", full_rec_loss)
         self.avg.add("loss/total", full_total_loss)
 
+        # Log the average losses
         if self.global_step % 100 == 0:
             self.trainer.save_checkpoint(self.chkpt_dir[:-5] + '/' + self.chkpt_dir[:-5] + f'_{self.global_step}.ckpt')
 
@@ -201,7 +211,7 @@ class JBUFeatUp(pl.LightningModule):
         if self.global_step < 10:
             self.clip_gradients(opt, gradient_clip_val=.0001, gradient_clip_algorithm="norm")
 
-        opt.step()
+        opt.step() # Update the model parameters (optimizer)
 
         return None
 
@@ -359,7 +369,7 @@ def my_app(cfg: DictConfig) -> None:
 
     trainer = Trainer(
         accelerator='gpu',
-        strategy="ddp",
+        strategy=DDPStrategy(find_unused_parameters=True),
         devices=cfg.num_gpus,
         max_epochs=cfg.epochs,
         logger=tb_logger,

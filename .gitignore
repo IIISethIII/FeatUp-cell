@@ -1,3 +1,6 @@
 .env
 featup.egg-info/
 build/
+*.so
+*.log
+*.pyc
