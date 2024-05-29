@@ -68,6 +68,11 @@ def get_featurizer(name, activation_type="key", **kwargs):
         model = DeepLabV3Featurizer(model)
         patch_size = 1
         dim = 2048
+    elif name == "directsam":
+        from .DirectSAM import DirectSAMFeaturizer
+        model = DirectSAMFeaturizer("chendelong/DirectSAM-1800px-0424")
+        patch_size = 1  # Adjust based on DirectSAM's output format
+        dim = 1  # Number of segmentation labels
     else:
         raise ValueError("unknown model: {}".format(name))
     return model, patch_size, dim
