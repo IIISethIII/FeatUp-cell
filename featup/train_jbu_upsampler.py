@@ -78,8 +78,10 @@ class JBUFeatUp(pl.LightningModule):
         self.chkpt_dir = chkpt_dir
 
         self.model, self.patch_size, self.dim = get_featurizer(model_type, activation_type, num_classes=1000)
-        for p in self.model.parameters():
-            p.requires_grad = False
+        self.model = self.model.to(self.device)  # Move the model to the correct device
+        if model_type != "directsam":
+            for p in self.model.parameters():
+                p.requires_grad = False
         self.model = torch.nn.Sequential(self.model, ChannelNorm(self.dim))
         self.upsampler = get_upsampler(upsampler, self.dim)
 
@@ -144,6 +146,8 @@ class JBUFeatUp(pl.LightningModule):
                 transform_params = sample_transform(
                     True, self.max_pad, self.max_zoom, img.shape[2], img.shape[3])
                 jit_img = apply_jitter(img, self.max_pad, transform_params) # Apply jittered transformations to the input image
+                if self.model_type == "resnet50":
+                    jit_img = torch.nn.functional.interpolate(jit_img, scale_factor=2, mode="bilinear")
                 lr_jit_feats = self.model(jit_img)  # Extract low-resolution features from the jittered image
 
             if self.random_projection is not None:
@@ -159,6 +163,15 @@ class JBUFeatUp(pl.LightningModule):
 
             down_jit_feats = self.project(self.downsampler(hr_jit_feats, jit_img), proj)  # Downsample the high-resolution jittered features
 
+            # Debug prints to inspect tensor shapes
+            if False:
+                print(f"lr_jit_feats shape: {lr_jit_feats.shape}")
+                print(f"hr_jit_feats shape: {hr_jit_feats.shape}")
+                print(f"down_jit_feats shape: {down_jit_feats.shape}")
+
+            # Ensure lr_jit_feats matches the spatial dimensions of down_jit_feats (TODO: this is just a quick fix to get resnet50 working)
+            #lr_jit_feats = torch.nn.functional.interpolate(lr_jit_feats, size=down_jit_feats.shape[2:], mode="bilinear")
+
             # Calculate reconstruction loss
             if self.predicted_uncertainty:
                 scales = self.scale_net(lr_jit_feats)
@@ -169,6 +182,7 @@ class JBUFeatUp(pl.LightningModule):
                 rec_loss = (self.project(lr_jit_feats, proj) - down_jit_feats).square().mean() / self.n_jitters
 
             full_rec_loss += rec_loss.item()
+            # print(f"Rec loss: {rec_loss.item()}")
 
             # Calculate CRF loss if applicable
             if self.crf_weight > 0 and i == 0:
@@ -248,7 +262,19 @@ class JBUFeatUp(pl.LightningModule):
                 writer = self.logger.experiment
 
                 hr_jit_feats = apply_jitter(hr_feats, self.max_pad, transform_params)
+                
+                # Print shape for debugging
+                # print(f"hr_jit_feats shape before resizing: {hr_jit_feats.shape}")
+                
+                # Resize hr_jit_feats to 224x224 if it's not already that size
+                if hr_jit_feats.shape[2:] != (224, 224):
+                    hr_jit_feats = F.interpolate(hr_jit_feats, size=(224, 224), mode='bilinear', align_corners=False)
+                
+                # print(f"hr_jit_feats shape after resizing: {hr_jit_feats.shape}")
                 down_jit_feats = self.downsampler(hr_jit_feats, jit_img)
+
+                # Print shape for debugging
+                # print(f"down_jit_feats shape: {down_jit_feats.shape}")
 
                 [red_lr_feats], fit_pca = pca([lr_feats[0].unsqueeze(0)])
                 [red_hr_feats], _ = pca([hr_feats[0].unsqueeze(0)], fit_pca=fit_pca)
@@ -313,6 +339,21 @@ def my_app(cfg: DictConfig) -> None:
     if cfg.model_type == "dinov2":
         final_size = 16
         kernel_size = 14
+    elif cfg.model_type == "resnet50":
+        final_size = 14
+        kernel_size = 35
+    elif cfg.model_type == "dinobloom":
+        final_size = 16
+        kernel_size = 14
+    elif cfg.model_type == "directsam":
+        final_size = 7
+        kernel_size = 14
+    elif cfg.model_type == "directsam2":
+        final_size = 14
+        kernel_size = 14
+    elif cfg.model_type == "directsam3":
+        final_size = 14
+        kernel_size = 14
     else:
         final_size = 14
         kernel_size = 16
@@ -372,9 +413,10 @@ def my_app(cfg: DictConfig) -> None:
         strategy=DDPStrategy(find_unused_parameters=True),
         devices=cfg.num_gpus,
         max_epochs=cfg.epochs,
+        max_steps=cfg.max_steps,
         logger=tb_logger,
-        val_check_interval=100,
-        log_every_n_steps=10,
+        val_check_interval=100, # 100
+        log_every_n_steps=10, # 10
         callbacks=callbacks,
         reload_dataloaders_every_n_epochs=1,
     )

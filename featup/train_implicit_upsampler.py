@@ -61,6 +61,19 @@ def get_implicit_upsampler(start_dim, end_dim, color_feats, n_freqs):
         torch.nn.Conv2d(end_dim, end_dim, 1),
     )
 
+def bilinear_upsample(x, size):
+    return F.interpolate(x, size=size, mode='bilinear', align_corners=False)
+
+class ResizeConv(torch.nn.Module):
+    def __init__(self, in_channels, out_channels, scale_factor):
+        super().__init__()
+        self.conv = torch.nn.Conv2d(in_channels, out_channels, 3, padding=1)
+        self.scale_factor = scale_factor
+
+    def forward(self, x):
+        x = F.interpolate(x, scale_factor=self.scale_factor, mode='bilinear', align_corners=False)
+        return self.conv(x)
+
 
 @hydra.main(config_path="configs", config_name="implicit_upsampler.yaml")
 def my_app(cfg: DictConfig) -> None:
@@ -99,6 +112,15 @@ def my_app(cfg: DictConfig) -> None:
         kernel_size = 35
         featurize_batch_size = 16
         steps = 500
+    elif cfg.model_type == "dinobloom":
+        multiplier = 1
+        final_size = 16
+        featurize_batch_size = 64
+        kernel_size = 29
+    elif cfg.model_type == "directsam2":
+        multiplier = 1
+        featurize_batch_size = 64
+        kernel_size = 29
     else:
         raise ValueError(f"Unknown model type {cfg.model_type}")
 
@@ -111,6 +133,11 @@ def my_app(cfg: DictConfig) -> None:
 
     feat_dir = join(cfg.output_root, "feats", cfg.experiment_name, cfg.dataset, cfg.split, cfg.model_type)
     log_dir = join(cfg.output_root, "logs", cfg.experiment_name, cfg.dataset, cfg.split, cfg.model_type)
+
+    # image output directory + "images" + dataset
+    OUTPUT_DIR = join(cfg.output_root, "images_" + cfg.dataset)
+    # add model name to output directory
+    OUTPUT_DIR = os.path.join(OUTPUT_DIR, cfg.model_type)
 
     model, _, dim = get_featurizer(cfg.model_type, activation_type=cfg.activation_type, output_root=cfg.output_root)
 
@@ -152,21 +179,31 @@ def my_app(cfg: DictConfig) -> None:
         if cfg.split == "val":
             full_dataset = full_dataset
         elif cfg.split == "train":
-            full_dataset = Subset(full_dataset, generate_subset(len(full_dataset), 5000))
+            full_dataset = Subset(full_dataset, generate_subset(len(full_dataset), 5000)) # 5000
+        elif cfg.split == "test":
+            full_dataset = full_dataset
         else:
             raise ValueError(f"Unknown dataset {cfg.dataset}")
 
-        full_size = len(full_dataset)
+        """full_size = len(full_dataset)
         partition_size = math.ceil(full_size / cfg.total_partitions)
         dataset = SlicedDataset(
             full_dataset,
             int(cfg.partition * partition_size),
-            int((cfg.partition + 1) * partition_size))
+            int((cfg.partition + 1) * partition_size))"""
+        indices = list(range(10))
+        dataset = Subset(full_dataset, indices)
+        partition_size = len(dataset)
     loader = DataLoader(dataset, shuffle=False)
 
     for img_num, batch in enumerate(loader):
         original_image = batch["img"].cuda()
-        output_location = join(feat_dir, "/".join(batch["img_path"][0].split("/")[-1:]).replace(".jpg", ".pth"))
+
+        # if dataset is marr
+        if cfg.dataset == "marr":
+            output_location = join(feat_dir, "/".join(batch["path"][0].split("/")[-1:]).replace(".jpg", ".pth"))
+        else:
+            output_location = join(feat_dir, "/".join(batch["img_path"][0].split("/")[-1:]).replace(".jpg", ".pth"))
 
         os.makedirs(dirname(output_location), exist_ok=True)
         if not redo and os.path.exists(output_location) and not cfg.dataset == "sample":
@@ -285,6 +322,7 @@ def my_app(cfg: DictConfig) -> None:
                 should_log = cfg.summarize and (i == (batch_size // inner_batch - 1))
 
                 if should_log and step % 10 == 0:
+                    print(f"Step {step}, loss {loss.item()}")
                     upsampler.eval()
                     downsampler.eval()
 
@@ -304,12 +342,29 @@ def my_app(cfg: DictConfig) -> None:
                     if cfg.blur_pin > 0.0:
                         writer.add_scalar("blur pin loss", blur_pin_loss, step)
 
-                if should_log and step % 100 == 0:
+                if should_log and step % 100 == 0 or step == 2000:
                     with torch.no_grad():
                         upsampler.eval()
                         downsampler.eval()
 
                         hr_feats = upsampler(original_image)
+
+                        # Bilinear upsampling
+                        bilinear_hr_feats = bilinear_upsample(lr_feats, size=(input_size_h, input_size_w))
+
+                        # Resize-conv upsampling
+                        if 'resize_conv' not in locals():
+                            resize_conv = ResizeConv(lr_feats.shape[1], lr_feats.shape[1], input_size_h // lr_feats.shape[2]).cuda()
+                        resize_conv_hr_feats = resize_conv(lr_feats)
+
+                        # PCA for bilinear and resize-conv
+                        [red_bilinear_hr_feats], _ = pca([unprojector(bilinear_hr_feats)], fit_pca=fit_pca, dim=9)
+                        [red_resize_conv_hr_feats], _ = pca([unprojector(resize_conv_hr_feats)], fit_pca=fit_pca, dim=9)
+                                                
+                        # print dimensions of hr_feats
+                        #print(f"hr_feats shape: {hr_feats.shape}")
+                        #print(f"hr_feats[0] shape: {hr_feats[0].shape}")
+
                         hr_mag = mag(hr_feats)
                         hr_both = torch.cat([hr_mag, hr_feats], dim=1)
                         target = []
@@ -338,8 +393,38 @@ def my_app(cfg: DictConfig) -> None:
                             unprojector(hr_feats), big_target, big_output
                         ], fit_pca=fit_pca, dim=9)
 
-                        def up(x):
+                        def up(x): # this upscaling works by interpolating the image to the size of the hr_feats but keeping the same values for each pixel in the image (i.e. no interpolation)
                             return F.interpolate(x.unsqueeze(0), hr_feats.shape[2:], mode="nearest").squeeze(0)
+                        
+                        def save_image(img_tensor, filename):
+                            img = (img_tensor.permute(1, 2, 0) * 255).clamp(0, 255).to(torch.uint8).cpu().numpy()
+                            Image.fromarray(img).save(filename)
+
+                        # only save images to the output_dir if this is the last step out of 2000
+                        if step == 2000:
+                            # Create directories
+                            os.makedirs(os.path.join(OUTPUT_DIR, "feats", "bilinear"), exist_ok=True)
+                            os.makedirs(os.path.join(OUTPUT_DIR, "feats", "resize_conv"), exist_ok=True)
+                            os.makedirs(os.path.join(OUTPUT_DIR, "feats", "hr"), exist_ok=True)
+                            os.makedirs(os.path.join(OUTPUT_DIR, "feats", "lr"), exist_ok=True)
+                            os.makedirs(os.path.join(OUTPUT_DIR, "feats", "pred"), exist_ok=True)
+                            os.makedirs(os.path.join(OUTPUT_DIR, "feats", "true"), exist_ok=True)
+                            os.makedirs(os.path.join(OUTPUT_DIR, "image"), exist_ok=True)
+
+                            for i in range(3):
+                                save_image(red_bilinear_hr_feats[0, i*3:(i+1)*3], os.path.join(OUTPUT_DIR, f"feats/bilinear/image_{img_num}_pca_{i+1}_step_{step}.png"))
+                                save_image(red_resize_conv_hr_feats[0, i*3:(i+1)*3], os.path.join(OUTPUT_DIR, f"feats/resize_conv/image_{img_num}_pca_{i+1}_step_{step}.png"))
+
+                            # Save PCA images
+                            for i in range(3):
+                                save_image(red_hr_feats[0, i*3:(i+1)*3], os.path.join(OUTPUT_DIR, f"feats/hr/image_{img_num}_pca_{i+1}_step_{step}.png"))
+                                save_image(up(red_lr_feats[0, i*3:(i+1)*3]), os.path.join(OUTPUT_DIR, f"feats/lr/image_{img_num}_pca_{i+1}_step_{step}.png"))
+                                save_image(red_target[0, i*3:(i+1)*3], os.path.join(OUTPUT_DIR, f"feats/pred/image_{img_num}_pca_{i+1}_step_{step}.png"))
+                                save_image(red_output[0, i*3:(i+1)*3], os.path.join(OUTPUT_DIR, f"feats/true/image_{img_num}_pca_{i+1}_step_{step}.png"))
+
+                            # Save original and transformed images
+                            save_image(unnorm(original_image)[0], os.path.join(OUTPUT_DIR, f"image/image_{img_num}_original_step_{step}.png"))
+                            save_image(unnorm(transformed_image)[0], os.path.join(OUTPUT_DIR, f"image/image_{img_num}_transformed_step_{step}.png"))
 
                         writer.add_image("feats/1/hr", red_hr_feats[0, :3], step)
                         writer.add_image("feats/2/hr", red_hr_feats[0, 3:6], step)

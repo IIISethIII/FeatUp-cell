@@ -1,18 +1,18 @@
 # Environment Args
-output_root: '../../'
-pytorch_data_dir: '/pytorch-data'
+output_root: '/home/icb/paul.volk/rbc_upsampling_comparision'
+pytorch_data_dir: '/home/icb/paul.volk/data/Elsafty_selected' #/ictstr01/groups/labs/marr/qscd01/workspace/rao.umer/pengmarr_hackathon_2023/datasets/
 submitting_to_aml: false
 summarize: true
-experiment_name: "exp1"
+experiment_name: "rbc_implicit_upsampler"
 
 # Dataset args
-dataset: "sample"
-split: "val"
+dataset: "custom"
+split: "test"
 partition: 0
 total_partitions: 1
 
 # Model Args
-model_type: "maskclip"
+model_type: "dino16" # dino16, dinov2, vit, dinobloom, directsam2
 activation_type: "token"
 
 # Upsampler args
@@ -33,7 +33,7 @@ param_type: "implicit"
 use_norm: false
 
 # Training args
-steps: 1200
+steps: 2001 # 1200
 n_images: 3000
 
 # No need to change

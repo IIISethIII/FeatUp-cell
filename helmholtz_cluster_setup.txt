@@ -1,0 +1,29 @@
+# Create the conda environment
+conda create -n featup python=3.10 -y
+
+# Activate the environment
+source activate featup
+
+# Install required packages using pip and conda
+pip install hydra-core tensorboard ninja ftfy regex h5py pandas imageio scikit-image imagecodecs
+
+# Install additional packages for marr dataset
+
+conda install pytorch torchvision torchaudio pytorch-cuda=12.4 -c pytorch -c nvidia -y
+conda install -c conda-forge cuda-nvcc=12.4 -y
+conda install -c nvidia cuda-toolkit
+
+# Install editable package
+pip install -e .
+
+Not working GPUs:
+NVIDIA H100 80GB HBM3
+
+Working GPUs:
+NVIDIA A100 80GB PCIe
+
+# testing
+# python -c "import torch; print(torch.__version__); print(torch.cuda.is_available()); print(torch.distributed.is_nccl_available())"
+# conda install pytorch torchvision torchaudio pytorch-cuda=11.6 -c pytorch -c nvidia
+# nvcc --version
+# nvidia-smi
