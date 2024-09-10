@@ -1,13 +1,14 @@
 # Environment Args
-output_root: '../../'
-pytorch_data_dir: '/pytorch-data'
+output_root: '/home/icb/paul.volk/experiments'
+pytorch_data_dir: '/home/icb/paul.volk/data/Elsafty_mixed' # /home/icb/paul.volk/data/RBCdataset/   /ictstr01/groups/labs/marr/qscd01/workspace/rao.umer/pengmarr_hackathon_2023/datasets/
+image_dir: "/home/icb/paul.volk/experiments_thesis/10_comp_rbc_output_custom"
 submitting_to_aml: false
 
 # Dataset args
-dataset: "cocostuff"
+dataset: "custom" # sample, custom, cocostuff, marr
 
 # Model Args
-model_type: "vit"
+model_type: "directsam2" # directsam2, dinobloom, vit, dinov2, dino16,        resnet50,       dino8, clip, maskclip, mae, mocov3, msn, pixels, deeplab
 activation_type: "token"
 
 # Upsampling args
@@ -16,7 +17,7 @@ upsampler_type: "jbu_stack"
 downsampler_type: "attention"
 max_pad: 20
 max_zoom: 2
-n_jitters: 5
+n_jitters: 2 # 5 
 random_projection: 30
 crf_weight: 0.001
 filter_ent_weight: 0.0
@@ -27,6 +28,7 @@ implicit_sup_weight: 1.0
 # Training args
 batch_size: 4
 epochs: 1
+max_steps: 2000
 num_gpus: 1
 num_workers: 24
 lr: 1e-3

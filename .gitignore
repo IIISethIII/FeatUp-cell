@@ -4,3 +4,4 @@ build/
 *.so
 *.log
 *.pyc
+featup/lightning_logs/

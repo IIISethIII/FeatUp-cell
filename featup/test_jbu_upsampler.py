@@ -2,6 +2,7 @@ import gc
 import os
 from PIL import Image
 import numpy as np
+import torch.nn.functional as F
 
 import hydra
 import pytorch_lightning as pl
@@ -12,7 +13,6 @@ from omegaconf import OmegaConf
 from pytorch_lightning import Trainer
 from pytorch_lightning import seed_everything
 from pytorch_lightning.callbacks import ModelCheckpoint
-from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.strategies import DDPStrategy
 from torch.utils.data import DataLoader, Subset
 from torchvision.transforms import InterpolationMode
@@ -29,9 +29,7 @@ from featup.util import pca, RollingAvg, unnorm, norm, prep_image
 
 torch.multiprocessing.set_sharing_strategy('file_system')
 
-
 class ScaleNet(torch.nn.Module):
-
     def __init__(self, dim):
         super().__init__()
         self.dim = dim
@@ -42,7 +40,6 @@ class ScaleNet(torch.nn.Module):
 
     def forward(self, x):
         return torch.exp(self.net(x) + .1).clamp_min(.0001)
-
 
 class JBUFeatUp(pl.LightningModule):
     def __init__(self,
@@ -62,6 +59,7 @@ class JBUFeatUp(pl.LightningModule):
                  upsampler,
                  downsampler,
                  chkpt_dir,
+                 image_dir,
                  ):
         super().__init__()
         self.model_type = model_type
@@ -78,6 +76,10 @@ class JBUFeatUp(pl.LightningModule):
         self.filter_ent_weight = filter_ent_weight
         self.tv_weight = tv_weight
         self.chkpt_dir = chkpt_dir
+        self.image_dir = image_dir  # Store the output directory
+
+        # set image_dir to current model name
+        self.image_dir = os.path.join(self.image_dir, self.model_type)
 
         self.model, self.patch_size, self.dim = get_featurizer(model_type, activation_type, num_classes=1000)
         for p in self.model.parameters():
@@ -132,31 +134,82 @@ class JBUFeatUp(pl.LightningModule):
                 hr_feats = torch.nn.functional.interpolate(hr_feats, img.shape[2:], mode="bilinear")
 
             # Save the images and hr_feats
-            img_dir = os.path.join(self.logger.save_dir, self.logger.name, 'imgs')
-            os.makedirs(img_dir, exist_ok=True)
+            original_dir = os.path.join(self.image_dir, 'original')
+            feats_dir = os.path.join(self.image_dir, 'feats')
+            cams_dir = os.path.join(self.image_dir, 'cams')
+            os.makedirs(original_dir, exist_ok=True)
+            os.makedirs(feats_dir, exist_ok=True)
+            os.makedirs(cams_dir, exist_ok=True)
 
             # Save original image
             orig_img = img[0].cpu().numpy().transpose(1, 2, 0)
             orig_img = ((orig_img - orig_img.min()) / (orig_img.max() - orig_img.min()) * 255).astype(np.uint8)
-            orig_img_path = os.path.join(img_dir, f"image_{batch_idx}.png")
+            # save image
+            orig_img_path = os.path.join(original_dir, f"image_{batch_idx}.png")
             Image.fromarray(orig_img).save(orig_img_path)
+
+            # Save low-resolution features image
+            [red_lr_feats], fit_pca = pca([lr_feats[0].unsqueeze(0)])
+            lr_feats_img = red_lr_feats[0].cpu().numpy().transpose(1, 2, 0)
+            lr_feats_img = ((lr_feats_img - lr_feats_img.min()) / (lr_feats_img.max() - lr_feats_img.min()) * 255).astype(np.uint8)
+            lr_feats_img_path = os.path.join(feats_dir, f"lr_feats_image_{batch_idx}.png")
+            ## this upscaling works by interpolating the image to the size of the hr_feats but keeping the same values for each pixel in the image (i.e. no interpolation)
+            lr_feats_img = torch.nn.functional.interpolate(torch.tensor(lr_feats_img).permute(2, 0, 1).unsqueeze(0).float(), hr_feats.shape[2:], mode="nearest").squeeze().permute(1, 2, 0).cpu().numpy().astype(np.uint8)
+            Image.fromarray(lr_feats_img).save(lr_feats_img_path)
 
             # Save high-resolution features image
             [red_hr_feats], fit_pca = pca([hr_feats[0].unsqueeze(0)])
             hr_feats_img = red_hr_feats[0].cpu().numpy().transpose(1, 2, 0)
             hr_feats_img = ((hr_feats_img - hr_feats_img.min()) / (hr_feats_img.max() - hr_feats_img.min()) * 255).astype(np.uint8)
-            hr_feats_img_path = os.path.join(img_dir, f"hr_feats_image_{batch_idx}.png")
+            hr_feats_img_path = os.path.join(feats_dir, f"hr_feats_image_{batch_idx}.png")
             Image.fromarray(hr_feats_img).save(hr_feats_img_path)
 
-            # Save high-resolution features tensor
-            #hr_feats_tensor_path = os.path.join(img_dir, f"hr_feats_tensor_{batch_idx}.pt")
-            #torch.save(hr_feats, hr_feats_tensor_path)
+            # Compute class activation maps (CAMs)
+            # cams = self.compute_cam(hr_feats)
+            
+            # Alternative selection strategies
+            # selected_cam = self.select_cam_by_saliency(img, cams)
+            # selected_cam = max(cams, key=lambda cam: cam.sum()) # Heuristic to select the relevant CAM (e.g., highest overall activation)
+            selected_cam = np.maximum.reduce(hr_feats[0].cpu().numpy())  # Heuristic to select the relevant CAM (e.g., highest overall activation)
+            # normalize
+            selected_cam = (selected_cam - selected_cam.min()) / (selected_cam.max() - selected_cam.min())
+            #selected_cam = (selected_cam * 255).astype(np.uint8)
+            
+            # Save the selected CAM
+            cam_dict = {3: selected_cam}
+            #cam_dict = {'3': selected_cam.cpu().numpy()}
+            cam_path = os.path.join(cams_dir, f"cam_{batch_idx}.npy")
+            np.save(cam_path, cam_dict)
 
-            #writer = self.logger.experiment
+    def compute_cam(self, hr_feats):
+        # Apply PCA to the high-resolution feature maps
+        reduced_feats, _ = pca([hr_feats])
+        
+        # Generate CAMs for each class
+        cams = []
+        for red_feat in reduced_feats:
+            for class_idx in range(red_feat.shape[1]):
+                cam = red_feat[:, class_idx, :, :].unsqueeze(1)  # Extract CAM for each class
+                cams.append(cam)
+        
+        return cams
+    
+    def select_cam_by_saliency(self, img, cams):
+        from skimage import filters
+        img_np = img[0].cpu().numpy().transpose(1, 2, 0)
+        saliency = filters.sobel(img_np.mean(axis=-1))
+        
+        best_cam = None
+        best_score = float('-inf')
+        for cam in cams:
+            cam_np = cam[0, 0].cpu().numpy()
+            score = (saliency * cam_np).sum()  # Measure overlap between saliency map and CAM
+            if score > best_score:
+                best_score = score
+                best_cam = cam
+        
+        return best_cam
 
-            #writer.add_image(f"test_viz/hr_feats_image_{batch_idx}", red_hr_feats[0], self.global_step)
-
-            #writer.flush()
 
     def configure_optimizers(self):
         all_params = []
@@ -183,6 +236,15 @@ def my_app(cfg: DictConfig) -> None:
     elif cfg.model_type == "resnet50":
         final_size = 14
         kernel_size = 35
+    elif cfg.model_type == "dinobloom":
+        final_size = 16
+        kernel_size = 14
+    elif cfg.model_type == "directsam":
+        final_size = 7
+        kernel_size = 16
+    elif cfg.model_type == "directsam2":
+        final_size = 14
+        kernel_size = 14
     else:
         final_size = 14
         kernel_size = 16
@@ -192,9 +254,8 @@ def my_app(cfg: DictConfig) -> None:
             f"crf_{cfg.crf_weight}_tv_{cfg.tv_weight}"
             f"_ent_{cfg.filter_ent_weight}")
 
-    log_dir = join(cfg.output_root, f"logs/jbu/{name}")
     chkpt_dir = join(cfg.output_root, f"checkpoints/jbu/{name}.ckpt")
-    os.makedirs(log_dir, exist_ok=True)
+    os.makedirs(cfg.image_dir, exist_ok=True)
 
     model = JBUFeatUp(
         model_type=cfg.model_type,
@@ -212,7 +273,8 @@ def my_app(cfg: DictConfig) -> None:
         tv_weight=cfg.tv_weight,
         upsampler=cfg.upsampler_type,
         downsampler=cfg.downsampler_type,
-        chkpt_dir=chkpt_dir
+        chkpt_dir=chkpt_dir,
+        image_dir=cfg.image_dir
     )
 
     transform = T.Compose([
@@ -224,19 +286,18 @@ def my_app(cfg: DictConfig) -> None:
     dataset = get_dataset(
         cfg.pytorch_data_dir,
         cfg.dataset,
-        "train",
+        "test",
         transform=transform,
         target_transform=None,
         include_labels=False)
 
     # Ensure to load different images
     # indices from 0 to 299
-    indices = list(range(300))
+    indices = list(range(10))
     subset = Subset(dataset, indices)
     val_loader = DataLoader(
         subset, 1, shuffle=False, num_workers=cfg.num_workers)
 
-    tb_logger = TensorBoardLogger(log_dir, default_hp_metric=False)
     callbacks = [ModelCheckpoint(chkpt_dir[:-5], every_n_epochs=1)]
 
     trainer = Trainer(
@@ -244,7 +305,6 @@ def my_app(cfg: DictConfig) -> None:
         strategy=DDPStrategy(find_unused_parameters=True),
         devices=cfg.num_gpus,
         max_epochs=cfg.epochs,
-        logger=tb_logger,
         val_check_interval=1,
         log_every_n_steps=1,
         callbacks=callbacks,
@@ -256,7 +316,7 @@ def my_app(cfg: DictConfig) -> None:
     gc.collect()
 
     # Load the checkpoint
-    checkpoint_path = "~/experiments/checkpoints/jbu/vit_jbu_stack_marr_attention_crf_0.001_tv_0.0_ent_0.0/epoch=0-step=15900.ckpt"
+    checkpoint_path = "/home/icb/paul.volk/experiments_thesis/checkpoints/jbu/directsam2_jbu_stack_custom_attention_crf_0.001_tv_0.0_ent_0.0.ckpt"
     model = JBUFeatUp.load_from_checkpoint(checkpoint_path, 
                                            model_type=cfg.model_type,
                                            activation_type=cfg.activation_type,
@@ -273,7 +333,8 @@ def my_app(cfg: DictConfig) -> None:
                                            tv_weight=cfg.tv_weight,
                                            upsampler=cfg.upsampler_type,
                                            downsampler=cfg.downsampler_type,
-                                           chkpt_dir=chkpt_dir
+                                           chkpt_dir=chkpt_dir,
+                                           image_dir=cfg.image_dir
                                            )
 
     trainer.validate(model, val_loader)

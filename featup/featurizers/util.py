@@ -69,10 +69,13 @@ def get_featurizer(name, activation_type="key", **kwargs):
         patch_size = 1
         dim = 2048
     elif name == "directsam":
-        from .DirectSAM import DirectSAMFeaturizer
-        model = DirectSAMFeaturizer("chendelong/DirectSAM-1800px-0424")
-        patch_size = 1  # Adjust based on DirectSAM's output format
-        dim = 1  # Number of segmentation labels
+        from .DirectSAM import get_direct_sam
+        model, patch_size, dim = get_direct_sam(feature_size='14x14')
+    elif name == "dinobloom":
+        from .DinoBloom import DinoBloom
+        model = DinoBloom()
+        patch_size = 14
+        dim = 384
     else:
         raise ValueError("unknown model: {}".format(name))
     return model, patch_size, dim

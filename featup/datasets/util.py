@@ -4,6 +4,7 @@ from featup.datasets.ImageNetSubset import ImageNetSubset
 from featup.datasets.COCO import Coco
 from featup.datasets.DAVIS import DAVIS
 from featup.datasets.SampleImage import SampleImage
+from featup.datasets.dataset_wbc import DatasetMarr
 
 
 class SlicedDataset(Dataset):
@@ -55,6 +56,24 @@ def get_dataset(dataroot, name, split, transform, target_transform, include_labe
                    "../sample-images/bird_right.jpg"],
             transform=transform
         )
+    elif name == "marr":
+        dataset_selection = ["Ace_20", "Mat_19", "MLL_20", "BMC_22"]  # Modify as needed
+        labels_map = {
+            'basophil': 0,
+            'eosinophil': 1,
+            'erythroblast': 2,
+            'promyelocyte': 3,
+            'myelocyte': 4,
+            'metamyelocyte': 5,
+            'neutrophil_banded': 6,
+            'neutrophil_segmented': 7,
+            'monocyte': 8,
+            'lymphocyte_typical': 9
+        }
+        fold = 0  # Adjust according to your needs
+        is_hsv = False  # Adjust according to your needs
+        is_hed = False  # Adjust according to your needs
+        return DatasetMarr(dataroot, dataset_selection, labels_map, fold, transform, split, is_hsv, is_hed)
     elif name == "custom":
         list_img = os.listdir(dataroot)
         return SampleImage(

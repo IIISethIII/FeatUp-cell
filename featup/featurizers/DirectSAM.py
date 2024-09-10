@@ -1,26 +1,55 @@
+from transformers import AutoModelForSemanticSegmentation
 import torch
 import torch.nn as nn
-from transformers import AutoModelForSemanticSegmentation, AutoImageProcessor
-from torchsummary import summary
 
 class DirectSAMFeaturizer(nn.Module):
-
-    def __init__(self, checkpoint="chendelong/DirectSAM-1800px-0424"):
+    def __init__(self, checkpoint="chendelong/DirectSAM-1800px-0424", feature_size='14x14'):
         super().__init__()
         self.model = AutoModelForSemanticSegmentation.from_pretrained(checkpoint)
-        self.image_processor = AutoImageProcessor.from_pretrained(checkpoint, reduce_labels=True)
-        # self.model.eval()  # Set model to evaluation mode
-        # print summary of the model
+        self.feature_size = feature_size
 
-
-    def forward(self, img):
-        # Process the image using the image processor
-        inputs = self.image_processor(img, return_tensors="pt")
-        # Move inputs to the same device as the model
-        inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
-        # Get the features from the model
+    def forward(self, x):
         with torch.no_grad():
-            outputs = self.model(**inputs)
-        # Extract the features
-        features = outputs.logits  # Assuming logits are the features we want
-        return features
+            encoder_outputs = self.model.segformer.encoder(
+                x, 
+                output_hidden_states=True, 
+                return_dict=True
+            )
+            
+            hidden_states = encoder_outputs.hidden_states
+            
+            if self.feature_size == '56x56':
+                return hidden_states[0]
+            elif self.feature_size == '28x28':
+                return hidden_states[1]
+            elif self.feature_size == '14x14':
+                return hidden_states[2]
+            elif self.feature_size == '7x7':
+                return hidden_states[3]
+            else:
+                raise ValueError(f"Unsupported feature size: {self.feature_size}")
+
+def get_direct_sam(feature_size='14x14'):
+    model = DirectSAMFeaturizer(feature_size=feature_size)
+    
+    if feature_size == '56x56':
+        patch_size = 4
+        dim = 64
+    elif feature_size == '28x28':
+        patch_size = 7
+        dim = 128
+    elif feature_size == '14x14':
+        patch_size = 14
+        dim = 320
+    elif feature_size == '7x7':
+        patch_size = 14
+        dim = 512
+    else:
+        raise ValueError(f"Unsupported feature size: {feature_size}")
+    
+    return model, patch_size, dim
+
+def get_feature_dimensions(model, sample_input):
+    with torch.no_grad():
+        output = model(sample_input)
+    return output.shape[1]  # Assuming output shape is [B, C, H, W]
