@@ -1,122 +1,74 @@
-# FeatUp: A Model-Agnostic Framework for Features at Any Resolution
-###  ICLR 2024
+# FeatUp-cell
 
+**Feature upsampling for blood cell images with domain-specific backbones**
+Code for my Bachelor's thesis *"Weakly Supervised Instance Segmentation of Out-of-Distribution Data of Red Blood Cells"* (TUM, Helmholtz Munich / Marr Lab, 2024, grade 1.3).
 
-[![Website](https://img.shields.io/badge/FeatUp-%F0%9F%8C%90Website-purple?style=flat)](https://aka.ms/featup) [![arXiv](https://img.shields.io/badge/arXiv-2403.10516-b31b1b.svg)](https://arxiv.org/abs/2403.10516) [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mhamilton723/FeatUp/blob/main/example_usage.ipynb)
-[![Huggingface](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-FeatUp-orange)](https://huggingface.co/spaces/mhamilton723/FeatUp) 
-[![Huggingface](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Paper%20Page-orange)](https://huggingface.co/papers/2403.10516)
-[![PWC](https://img.shields.io/endpoint.svg?url=https://paperswithcode.com/badge/featup-a-model-agnostic-framework-for/feature-upsampling-on-imagenet)](https://paperswithcode.com/sota/feature-upsampling-on-imagenet?p=featup-a-model-agnostic-framework-for)
+This repository is a fork of [FeatUp](https://github.com/mhamilton723/FeatUp) (Fu, Hamilton et al., ICLR 2024). I added two new backbones – **DinoBloom** and **DirectSAM** – and used FeatUp to upsample their feature maps for white and red blood cell microscopy images.
 
+![FeatUp feature maps for red blood cells across backbones](assets/rbc_implicit_backbones.png)
+*Low-resolution backbone features (top) vs. FeatUp-upsampled features (bottom, implicit upsampler) on a red blood cell image. DinoBloom and DirectSAM separate cells from the background most clearly.*
 
+---
 
-[Stephanie Fu*](https://stephanie-fu.github.io/),
-[Mark Hamilton*](https://mhamilton.net/),
-[Laura Brandt](https://people.csail.mit.edu/lebrandt/),
-[Axel Feldman](https://feldmann.nyc/),
-[Zhoutong Zhang](https://ztzhang.info/),
-[William T. Freeman](https://billf.mit.edu/about/bio)
-*Equal Contribution.
+## Motivation
 
-![FeatUp Overview Graphic](https://mhamilton.net/images/website_hero_small-p-1080.jpg)
+Around 20% of complete blood counts still need manual review by experts, and red blood cell shape is an important diagnostic signal (e.g. teardrop-shaped or fragmented cells). Vision transformers produce useful features for this, but only at low resolution (14×14 for a 224×224 image), which is too coarse to capture cell boundaries. FeatUp restores high-resolution feature maps without changing their semantics.
 
-*TL;DR*:FeatUp improves the spatial resolution of any model's features by 16-32x without changing their semantics.
+The question of the thesis: **Do backbones built for blood cells or for segmentation give better upsampled features for red blood cells than general-purpose backbones – even when the data is out of distribution?**
 
-https://github.com/mhamilton723/FeatUp/assets/6456637/8fb5aa7f-4514-4a97-aebf-76065163cdfd
+## What I did
 
+- **Integrated two new backbones into FeatUp**
+  - **DinoBloom** ([marrlab/DinoBloom](https://github.com/marrlab/DinoBloom)) – a DINOv2 ViT-S/14 trained on hematology images, mostly white blood cells. Heads removed, features reshaped to FeatUp's format (patch size 14, 384 dims).
+  - **DirectSAM** (`chendelong/DirectSAM-1800px-0424`) – a SegFormer-based boundary segmentation model. Features are taken from the encoder's hidden states (patch size 14, 320 dims).
+- **Trained both FeatUp upsamplers** (Joint Bilateral Upsampler and implicit upsampler, 16× from 14×14 to 224×224) for DinoBloom, DirectSAM and the baselines DINO16, DINOv2 and ViT on the Helmholtz Munich HPC cluster.
+- **Evaluated on two datasets**
+  - White blood cells (baseline): ~249k images from Matek-19, Acevedo-20, BMC-20 and INT-20, 21 classes
+  - Red blood cells (out of distribution for DinoBloom): *1 Million Segmented Red Blood Cells* (Elsafty), ~240k cells from 25 blood smears, 9 shape classes, 4 different cameras
+- **Compared against baseline upsampling** (bilinear, resize convolution).
 
-## Contents
-<!--ts-->
-   * [Install](#install)
-   * [Using Pretrained Upsamplers](#using-pretrained-upsamplers)
-   * [Fitting an Implicit Upsampler](#fitting-an-implicit-upsampler-to-an-image)
-   * [Coming Soon](coming-soon)
-   * [Citation](#citation)
-   * [Contact](#contact)
-<!--te-->
+![DirectSAM integration](assets/directsam_integration.png)
+*Extracting encoder features from DirectSAM so it can be used as a FeatUp backbone.*
 
-## Install
+## Results (qualitative)
 
-### Pip
-For those just looking to quickly use the FeatUp APIs install via:
-```shell script
-pip install git+https://github.com/mhamilton723/FeatUp
-```
+![Baseline upsampling vs. FeatUp](assets/baseline_vs_featup_dinobloom.png)
+*Red blood cells of different shapes (rows) with DinoBloom features: low-resolution, bilinear, resize convolution, FeatUp JBU and FeatUp implicit.*
 
-### Local Development
-To install FeatUp for local development and to get access to the sample images install using the following:
-```shell script
-git clone https://github.com/mhamilton723/FeatUp.git
-cd FeatUp
+- FeatUp produced sharper, more detailed feature maps than bilinear upsampling and resize convolution for all backbones; the implicit upsampler gave the sharpest results.
+- **DinoBloom** showed the highest contrast between cells and background on red blood cells, even though it was trained mainly on white blood cells – a sign of good generalization.
+- **DirectSAM** gave the clearest cell boundaries and the most uniform background, which makes it a good candidate for downstream segmentation.
+
+**Limitations:** Training ran for 2,000 steps and did not use the full datasets, and the evaluation is qualitative only. Natural next steps are using the feature maps in an actual segmentation model, measuring IoU/mAP, and fine-tuning the backbones on red blood cell data.
+
+## Running it
+
+Setup and training work as in the original FeatUp repository (see [upstream README](https://github.com/mhamilton723/FeatUp#readme)):
+
+```bash
+git clone https://github.com/IIISethIII/FeatUp-cell.git
+cd FeatUp-cell
 pip install -e .
-```
 
-## Using Pretrained Upsamplers
-
-To see examples of pretrained model usage please see our [Collab notebook](https://colab.research.google.com/github/mhamilton723/FeatUp/blob/main/example_usage.ipynb). We currently supply the following pretrained versions of FeatUp's JBU upsampler:
-
-| Model Name | Checkpoint                                                                                                                       | Checkpoint (No LayerNorm)                                                                                                                  | Torch Hub Repository | Torch Hub Name |
-|------------|----------------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------|----------------------|----------------|
-| DINO       | [Download](https://marhamilresearch4.blob.core.windows.net/feature-upsampling-public/pretrained/dino16_jbu_stack_cocostuff.ckpt) | [Download](https://marhamilresearch4.blob.core.windows.net/feature-upsampling-public/pretrained/no_norm/dino16_jbu_stack_cocostuff.ckpt)   | mhamilton723/FeatUp  | dino16         |
-| DINO v2    | [Download](https://marhamilresearch4.blob.core.windows.net/feature-upsampling-public/pretrained/dinov2_jbu_stack_cocostuff.ckpt) | [Download](https://marhamilresearch4.blob.core.windows.net/feature-upsampling-public/pretrained/no_norm/dinov2_jbu_stack_cocostuff.ckpt)   | mhamilton723/FeatUp  | dinov2         |
-| CLIP       | [Download](https://marhamilresearch4.blob.core.windows.net/feature-upsampling-public/pretrained/clip_jbu_stack_cocostuff.ckpt)   | [Download](https://marhamilresearch4.blob.core.windows.net/feature-upsampling-public/pretrained/no_norm/clip_jbu_stack_cocostuff.ckpt)     | mhamilton723/FeatUp  | clip           |
-| MaskCLIP   | n/a                                                                                                                              | [Download](https://marhamilresearch4.blob.core.windows.net/feature-upsampling-public/pretrained/no_norm/maskclip_jbu_stack_cocostuff.ckpt) | mhamilton723/FeatUp  | maskclip       |
-| ViT        | [Download](https://marhamilresearch4.blob.core.windows.net/feature-upsampling-public/pretrained/vit_jbu_stack_cocostuff.ckpt)      | [Download](https://marhamilresearch4.blob.core.windows.net/feature-upsampling-public/pretrained/no_norm/vit_jbu_stack_cocostuff.ckpt)      | mhamilton723/FeatUp  | vit            |
-| ResNet50   | [Download](https://marhamilresearch4.blob.core.windows.net/feature-upsampling-public/pretrained/resnet50_jbu_stack_cocostuff.ckpt) | [Download](https://marhamilresearch4.blob.core.windows.net/feature-upsampling-public/pretrained/no_norm/resnet50_jbu_stack_cocostuff.ckpt) | mhamilton723/FeatUp  | resnet50       |
-
-For example, to load the FeatUp JBU upsampler for the DINO backbone without an additional LayerNorm on the spatial features:
-
-```python
-upsampler = torch.hub.load("mhamilton723/FeatUp", 'dino16', use_norm=False)
-```
-
-To load upsamplers trained on backbones with additional LayerNorm operations which makes training and transfer learning a bit more stable:
-
-```python
-upsampler = torch.hub.load("mhamilton723/FeatUp", 'dino16')
-```
-
-## Fitting an Implicit Upsampler to an Image
-
-To train an implicit upsampler for a given image and backbone first clone the repository and install it for 
-[local development](#local-development). Then run
-
-```python
 cd featup
-python train_implicit_upsampler.py
+python train_jbu_upsampler.py        # Joint Bilateral Upsampler
+python train_implicit_upsampler.py   # implicit upsampler
 ```
 
-Parameters for this training operation can be found in the [implicit_upsampler config file](featup/configs/implicit_upsampler.yaml).
+The backbone and dataset are selected in the config files in `featup/configs/`. Notes on running this on the Helmholtz Munich cluster are in `helmholtz_cluster_setup.txt`.
 
-## Local Gradio Demo
+## Credits
 
-To run our [HuggingFace Spaces hosted FeatUp demo](https://huggingface.co/spaces/mhamilton723/FeatUp) locally first install FeatUp for local development. Then  run:
+- FeatUp: Stephanie Fu, Mark Hamilton, Laura Brandt, Axel Feldmann, Zhoutong Zhang, William T. Freeman – [paper](https://openreview.net/forum?id=GkJiNn2QDF), [code](https://github.com/mhamilton723/FeatUp) (MIT License)
+- DinoBloom: Marr Lab, Helmholtz Munich
+- Thesis supervision: Dr. Umer Rao Muhammad and Dr. Carsten Marr (Helmholtz Munich); examiner Prof. Dr. Fabian J. Theis (TUM)
 
-```shell
-python gradio_app.py
-```
-
-Wait a few seconds for the demo to spin up, then navigate to [http://localhost:7860/](http://localhost:7860/) to view the demo.
-
-
-## Coming Soon:
-
-- Training your own FeatUp joint bilateral upsampler
-- Simple API for Implicit FeatUp training
-
-
-## Citation
-
-```
-@inproceedings{
-    fu2024featup,
-    title={FeatUp: A Model-Agnostic Framework for Features at Any Resolution},
-    author={Stephanie Fu and Mark Hamilton and Laura E. Brandt and Axel Feldmann and Zhoutong Zhang and William T. Freeman},
-    booktitle={The Twelfth International Conference on Learning Representations},
-    year={2024},
-    url={https://openreview.net/forum?id=GkJiNn2QDF}
+```bibtex
+@inproceedings{fu2024featup,
+  title     = {FeatUp: A Model-Agnostic Framework for Features at Any Resolution},
+  author    = {Stephanie Fu and Mark Hamilton and Laura E. Brandt and Axel Feldmann and Zhoutong Zhang and William T. Freeman},
+  booktitle = {The Twelfth International Conference on Learning Representations},
+  year      = {2024},
+  url       = {https://openreview.net/forum?id=GkJiNn2QDF}
 }
 ```
-
-## Contact
-
-For feedback, questions, or press inquiries please contact [Stephanie Fu](mailto:fus@mit.edu) and [Mark Hamilton](mailto:markth@mit.edu)
